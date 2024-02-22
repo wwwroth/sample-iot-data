@@ -1,22 +1,27 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/joho/godotenv"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"log"
 	"math/rand"
 	"time"
 )
 
 type Reading struct {
-	ID          string
-	Temperature float64
-	DeviceID    string
-	RecordedAt  time.Time
+	ReadingID   string    `bson:"reading_id,omitempty"`
+	Temperature float64   `bson:"temperature"`
+	DeviceID    string    `bson:"device_id"`
+	RecordedAt  time.Time `bson:"recorded_at"`
 }
 
 func main() {
@@ -32,8 +37,8 @@ func main() {
 	readingsPerDevice := flag.Int("readingsPerDevice", 10, "How many readings per device would you like to create?")
 	flag.Parse()
 
-	fmt.Println("Starting mock data generation.")
-	fmt.Printf("Creating %d devices with %d readings each.\n", *devices, *readingsPerDevice)
+	log.Println("Starting mock data generation.")
+	log.Printf("Creating %d devices with %d readings each.\n", *devices, *readingsPerDevice)
 
 	// Seed the random number generator
 	source := rand.NewSource(time.Now().UnixNano())
@@ -54,15 +59,78 @@ func main() {
 	for i = 0; i < *devices; i++ {
 		for j = 0; j < *readingsPerDevice; j++ {
 			exampleReading := Reading{
-				ID:          HashInt(j),
+				ReadingID:   HashInt(j),
 				Temperature: minTemp + rng.Float64()*(maxTemp-minTemp),
 				DeviceID:    HashInt(i),
 				RecordedAt:  time.Now(),
 			}
-			fmt.Println(toJSON(exampleReading))
 			readings = append(readings, exampleReading)
 		}
 	}
+
+	// Set client options
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+
+	// Connect to MongoDB
+	client, err := mongo.Connect(context.TODO(), clientOptions)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Check the connection
+	err = client.Ping(context.TODO(), readpref.Primary())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Truncating existing data")
+	err = truncateCollection(client.Database("sample_iot_data").Collection("readings"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Inserting new data")
+	err = insertReadings(readings, client.Database("sample_iot_data").Collection("readings"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Disconnect from MongoDB
+	defer client.Disconnect(context.TODO())
+}
+
+func truncateCollection(collection *mongo.Collection) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// An empty filter matches all documents in the collection
+	filter := bson.D{{}}
+
+	result, err := collection.DeleteMany(ctx, filter)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Deleted %v documents\n", result.DeletedCount)
+	return nil
+}
+
+func insertReadings(readings []Reading, collection *mongo.Collection) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var documents []interface{}
+	for _, reading := range readings {
+		documents = append(documents, reading)
+	}
+
+	result, err := collection.InsertMany(ctx, documents)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Inserted %v documents\n", len(result.InsertedIDs))
+	return nil
 }
 
 // HashInt takes an integer and returns a hashed string
