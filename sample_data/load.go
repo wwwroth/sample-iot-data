@@ -14,6 +14,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -38,7 +39,7 @@ func main() {
 	flag.Parse()
 
 	log.Println("Starting mock data generation.")
-	log.Printf("Creating %d devices with %d readings each.\n", *devices, *readingsPerDevice)
+	log.Printf("Creating %d devices with %d readings each - %d total \n", *devices, *readingsPerDevice, *devices**readingsPerDevice)
 
 	// Seed the random number generator
 	source := rand.NewSource(time.Now().UnixNano())
@@ -50,8 +51,8 @@ func main() {
 
 	readings := []Reading{}
 
-	i := 0
-	j := 0
+	i := 1
+	j := 1
 
 	// Iterate over each device and create mock readings
 	// Hashing the device (i) will result in a consistent device ID
@@ -90,10 +91,34 @@ func main() {
 	}
 
 	log.Printf("Inserting new data")
-	err = insertReadings(readings, client.Database("sample_iot_data").Collection("readings"))
-	if err != nil {
-		log.Fatal(err)
+
+	batchSize := 500
+	numGoroutines := len(readings) / batchSize
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			start := i * batchSize
+			end := start + batchSize
+			if end > len(readings) {
+				end = len(readings)
+			}
+
+			err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
+			if err != nil {
+				log.Printf("Failed to insert batch %d: %v", i, err)
+			}
+		}(i)
 	}
+
+	wg.Wait()
+
+	log.Println("All data inserted.")
+	count := countReadings(client.Database("sample_iot_data").Collection("readings"))
+	log.Printf("Inserted %d records.", count)
 
 	// Disconnect from MongoDB
 	defer client.Disconnect(context.TODO())
@@ -124,13 +149,21 @@ func insertReadings(readings []Reading, collection *mongo.Collection) error {
 		documents = append(documents, reading)
 	}
 
-	result, err := collection.InsertMany(ctx, documents)
+	_, err := collection.InsertMany(ctx, documents)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("Inserted %v documents\n", len(result.InsertedIDs))
 	return nil
+}
+
+func countReadings(collection *mongo.Collection) int64 {
+	count, err := collection.CountDocuments(context.Background(), map[string]interface{}{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return count
 }
 
 // HashInt takes an integer and returns a hashed string

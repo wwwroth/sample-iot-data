@@ -1,5 +1,6 @@
 ### Load Sample Data
 
 ```shell
-go run sample_data/load.go -devices=20 -readingsPerDevice=500 
+#Inserting a total of 1,000,000 records across 10 devices
+go run sample_data/load.go -devices=10 -readingsPerDevice=100000 
 ```
