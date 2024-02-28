@@ -7,15 +7,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
+	"math/rand"
+	"sync"
+	"time"
+
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
-	"log"
-	"math/rand"
-	"sync"
-	"time"
 )
 
 type Reading struct {
@@ -35,11 +36,12 @@ func main() {
 
 	// Define and parse flags
 	devices := flag.Int("devices", 1, "How many mock devices would you like to create?")
-	readingsPerDevice := flag.Int("readingsPerDevice", 10, "How many readings per device would you like to create?")
+	daysOfData := flag.Int("days", 365, "How many days of data per device would you like to mock?")
 	flag.Parse()
 
 	log.Println("Starting mock data generation.")
-	log.Printf("Creating %d devices with %d readings each - %d total \n", *devices, *readingsPerDevice, *devices**readingsPerDevice)
+
+	log.Printf("Generating %d devices with %d days worth of data.", *devices, *daysOfData)
 
 	// Seed the random number generator
 	source := rand.NewSource(time.Now().UnixNano())
@@ -51,19 +53,23 @@ func main() {
 
 	readings := []Reading{}
 
-	i := 1
-	j := 1
+	// Go back in time the number of days provided
+	currentTime := time.Now()
+	startTime := currentTime.AddDate(0, 0, -*daysOfData)
 
-	// Iterate over each device and create mock readings
-	// Hashing the device (i) will result in a consistent device ID
-	// Hashing the reading (j) will result in a unique reading ID
-	for i = 0; i < *devices; i++ {
-		for j = 0; j < *readingsPerDevice; j++ {
+	// There are 1440 minutes in a day
+	totalMinutes := *daysOfData * 1440
+
+	// For the total number of minutes in the provided days, create a mock
+	// data object for each device from the starting point in time until now
+	for i := 1; i <= totalMinutes; i++ {
+		for j := 1; j <= *devices; j++ {
+			timestamp := startTime.Add(time.Duration(i) * time.Minute)
 			exampleReading := Reading{
-				ReadingID:   HashInt(j),
+				ReadingID:   HashInt(i + j),
 				Temperature: minTemp + rng.Float64()*(maxTemp-minTemp),
-				DeviceID:    HashInt(i),
-				RecordedAt:  time.Now(),
+				DeviceID:    HashInt(j),
+				RecordedAt:  timestamp,
 			}
 			readings = append(readings, exampleReading)
 		}
@@ -92,7 +98,7 @@ func main() {
 
 	log.Printf("Inserting new data")
 
-	batchSize := 500
+	batchSize := 50
 	numGoroutines := len(readings) / batchSize
 
 	var wg sync.WaitGroup
@@ -106,7 +112,6 @@ func main() {
 			if end > len(readings) {
 				end = len(readings)
 			}
-
 			err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
 			if err != nil {
 				log.Printf("Failed to insert batch %d: %v", i, err)
