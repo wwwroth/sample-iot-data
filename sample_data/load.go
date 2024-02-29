@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -92,19 +91,19 @@ func main() {
 	retryCount := 0
 	maxRetries := 10
 
-	log.Printf("Truncating existing data")
+	log.Printf("Dropping existing collection")
 
 	for retryCount < maxRetries {
 
-		err = truncateCollection(client.Database("sample_iot_data").Collection("readings"))
+		err = dropCollection(client.Database("sample_iot_data").Collection("readings"))
 		if err == nil {
-			log.Printf("Truncating complete")
+			log.Printf("Dropping collection complete")
 			break
 		}
 
 		retryCount++
 
-		log.Printf("Truncation attempt %d failed, error: %v\n", retryCount, err)
+		log.Printf("Dropping collection attempt %d failed, error: %v\n", retryCount, err)
 
 		if retryCount < maxRetries {
 			log.Println("Retrying...")
@@ -113,17 +112,26 @@ func main() {
 	}
 
 	if err != nil {
-		log.Fatalf("Truncation after %d attempts, failed to truncate collection: %v", maxRetries, err)
+		log.Fatalf("Dropping collection failed after %d attempts, failed to drop collection: %v", maxRetries, err)
 	}
 
 	log.Printf("Inserting new data")
 
-	batchSize := 10000
+	batchSize := 500000
+	totalReadings := len(readings)
 	numGoroutines := len(readings) / batchSize
+
+	if totalReadings%batchSize != 0 {
+		numGoroutines++ // Account for partial batch
+	}
 
 	for i := 0; i < numGoroutines; i++ {
 		start := i * batchSize
 		end := start + batchSize
+		if end > totalReadings {
+			end = totalReadings // Adjust end for the last partial batch
+		}
+		log.Printf("Inserting batch %d:%d", start, end)
 		err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
 		if err != nil {
 			log.Printf("Failed to insert batch %d: %v", i, err)
@@ -157,14 +165,11 @@ func main() {
 	defer client.Disconnect(context.TODO())
 }
 
-func truncateCollection(collection *mongo.Collection) error {
+func dropCollection(collection *mongo.Collection) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// An empty filter matches all documents in the collection
-	filter := bson.D{{}}
-
-	_, err := collection.DeleteMany(ctx, filter)
+	err := collection.Drop(ctx)
 	if err != nil {
 		return err
 	}
