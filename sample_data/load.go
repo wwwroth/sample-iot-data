@@ -89,10 +89,31 @@ func main() {
 		log.Fatal(err)
 	}
 
+	retryCount := 0
+	maxRetries := 10
+
 	log.Printf("Truncating existing data")
-	err = truncateCollection(client.Database("sample_iot_data").Collection("readings"))
+
+	for retryCount < maxRetries {
+
+		err = truncateCollection(client.Database("sample_iot_data").Collection("readings"))
+		if err == nil {
+			log.Printf("Truncating complete")
+			break
+		}
+
+		retryCount++
+
+		log.Printf("Truncation attempt %d failed, error: %v\n", retryCount, err)
+
+		if retryCount < maxRetries {
+			log.Println("Retrying...")
+			time.Sleep(time.Second * 2)
+		}
+	}
+
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Truncation after %d attempts, failed to truncate collection: %v", maxRetries, err)
 	}
 
 	log.Printf("Inserting new data")
@@ -143,12 +164,11 @@ func truncateCollection(collection *mongo.Collection) error {
 	// An empty filter matches all documents in the collection
 	filter := bson.D{{}}
 
-	result, err := collection.DeleteMany(ctx, filter)
+	_, err := collection.DeleteMany(ctx, filter)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("Deleted %v documents\n", result.DeletedCount)
 	return nil
 }
 
