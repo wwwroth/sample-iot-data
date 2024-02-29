@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -98,28 +97,36 @@ func main() {
 
 	log.Printf("Inserting new data")
 
-	batchSize := 50
+	batchSize := 10000
 	numGoroutines := len(readings) / batchSize
 
-	var wg sync.WaitGroup
-
 	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			start := i * batchSize
-			end := start + batchSize
-			if end > len(readings) {
-				end = len(readings)
-			}
-			err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
-			if err != nil {
-				log.Printf("Failed to insert batch %d: %v", i, err)
-			}
-		}(i)
+		start := i * batchSize
+		end := start + batchSize
+		err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
+		if err != nil {
+			log.Printf("Failed to insert batch %d: %v", i, err)
+		}
 	}
 
-	wg.Wait()
+	//var wg sync.WaitGroup
+
+	//for i := 0; i < numGoroutines; i++ {
+	//	wg.Add(1)
+	//	go func(i int) {
+	//		defer wg.Done()
+	//		start := i * batchSize
+	//		end := start + batchSize
+	//		if end > len(readings) {
+	//			end = len(readings)
+	//		}
+	//		err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
+	//		if err != nil {
+	//			log.Printf("Failed to insert batch %d: %v", i, err)
+	//		}
+	//	}(i)
+	//}
+	//wg.Wait()
 
 	log.Println("All data inserted.")
 	count := countReadings(client.Database("sample_iot_data").Collection("readings"))
