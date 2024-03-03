@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -25,202 +25,157 @@ type Reading struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
-	// Load .env file to as environment variables
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
+func run() error {
+
+	// Load environment variables
+	if err := godotenv.Load(); err != nil {
+		return fmt.Errorf("error loading .env file: %w", err)
 	}
 
-	// Define and parse flags
-	devices := flag.Int("devices", 1, "How many mock devices would you like to create?")
-	daysOfData := flag.Int("days", 365, "How many days of data per device would you like to mock?")
-	flag.Parse()
+	// Parse flags
+	devices, daysOfData := parseFlags()
 
-	log.Println("Starting mock data generation.")
+	log.Printf("Generating %d devices with %d days worth of data", devices, daysOfData)
 
-	log.Printf("Generating %d devices with %d days worth of data.", *devices, *daysOfData)
+	// Generate readings
+	readings := generateReadings(devices, daysOfData)
 
-	// Seed the random number generator
-	source := rand.NewSource(time.Now().UnixNano())
-	rng := rand.New(source)
-
-	// Define the range of temperatures within 0 and 100 for mock purposes
-	minTemp := 0.0
-	maxTemp := 100.0
-
-	readings := []Reading{}
-
-	// Go back in time the number of days provided
-	currentTime := time.Now()
-	startTime := currentTime.AddDate(0, 0, -*daysOfData)
-
-	// There are 1440 minutes in a day
-	totalMinutes := *daysOfData * 1440
-
-	// For the total number of minutes in the provided days, create a mock
-	// data object for each device from the starting point in time until now
-	for i := 1; i <= totalMinutes; i++ {
-		for j := 1; j <= *devices; j++ {
-			timestamp := startTime.Add(time.Duration(i) * time.Minute)
-			exampleReading := Reading{
-				ReadingID:   HashInt(i + j),
-				Temperature: minTemp + rng.Float64()*(maxTemp-minTemp),
-				DeviceID:    HashInt(j),
-				RecordedAt:  timestamp,
-			}
-			readings = append(readings, exampleReading)
-		}
-	}
-
-	// Set client options
-	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	mongoUrl := os.Getenv("MONGO_URI")
+	mongoDb := os.Getenv("MONGO_DB")
+	mongoCollection := os.Getenv("MONGO_COLLECTION")
 
 	// Connect to MongoDB
+	client, err := connectToMongoDB(mongoUrl)
+	if err != nil {
+		return err
+	}
+	defer client.Disconnect(context.TODO())
+
+	// Insert readings into MongoDB
+	if err := insertReadingsIntoMongoDB(client, mongoDb, mongoCollection, readings); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func parseFlags() (int, int) {
+	devices := flag.Int("devices", 1, "Number of mock devices to create.")
+	daysOfData := flag.Int("days", 365, "Number of days of data per device to mock.")
+	flag.Parse()
+	return *devices, *daysOfData
+}
+
+func generateReadings(devices, daysOfData int) []Reading {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	minTemp, maxTemp := 0.0, 100.0
+	var readings []Reading
+
+	startTime := time.Now().AddDate(0, 0, -daysOfData)
+	totalMinutes := daysOfData * 1440
+
+	for i := 0; i < totalMinutes; i++ {
+		for j := 1; j <= devices; j++ {
+			timestamp := startTime.Add(time.Duration(i) * time.Minute)
+			readings = append(readings, Reading{
+				ReadingID:   hashInt(i + j),
+				Temperature: minTemp + rng.Float64()*(maxTemp-minTemp),
+				DeviceID:    hashInt(j),
+				RecordedAt:  timestamp,
+			})
+		}
+	}
+
+	return readings
+}
+
+func connectToMongoDB(mongoUrl string) (*mongo.Client, error) {
+	log.Printf("Connecting to MongoDB with connection %s", mongoUrl)
+	clientOptions := options.Client().ApplyURI(mongoUrl)
 	client, err := mongo.Connect(context.TODO(), clientOptions)
 	if err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+	}
+	if err := client.Ping(context.TODO(), readpref.Primary()); err != nil {
+		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
+	}
+	return client, nil
+}
+
+func insertReadingsIntoMongoDB(client *mongo.Client, mongoDb string, mongoCollection string, readings []Reading) error {
+
+	log.Printf("Truncating records (dropping collection): %s/%s", mongoDb, mongoCollection)
+
+	collection := client.Database(mongoDb).Collection(mongoCollection)
+	if err := dropCollection(collection); err != nil {
+		return err
 	}
 
-	// Check the connection
-	err = client.Ping(context.TODO(), readpref.Primary())
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	retryCount := 0
-	maxRetries := 10
-
-	log.Printf("Dropping existing collection")
-
-	for retryCount < maxRetries {
-
-		err = dropCollection(client.Database("sample_iot_data").Collection("readings"))
-		if err == nil {
-			log.Printf("Dropping collection complete")
-			break
-		}
-
-		retryCount++
-
-		log.Printf("Dropping collection attempt %d failed, error: %v\n", retryCount, err)
-
-		if retryCount < maxRetries {
-			log.Println("Retrying...")
-			time.Sleep(time.Second * 2)
-		}
-	}
-
-	if err != nil {
-		log.Fatalf("Dropping collection failed after %d attempts, failed to drop collection: %v", maxRetries, err)
-	}
-
-	log.Printf("Inserting new data")
+	log.Printf("Inserting records into MongoDB: %s/%s", mongoDb, mongoCollection)
 
 	batchSize := 500000
-	totalReadings := len(readings)
-	numGoroutines := len(readings) / batchSize
-
-	if totalReadings%batchSize != 0 {
-		numGoroutines++ // Account for partial batch
-	}
-
-	for i := 0; i < numGoroutines; i++ {
-		start := i * batchSize
-		end := start + batchSize
-		if end > totalReadings {
-			end = totalReadings // Adjust end for the last partial batch
+	for i := 0; i < len(readings); i += batchSize {
+		end := i + batchSize
+		if end > len(readings) {
+			end = len(readings)
 		}
-		log.Printf("Inserting batch %d:%d", start, end)
-		err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
-		if err != nil {
-			log.Printf("Failed to insert batch %d: %v", i, err)
+		log.Printf("Inserting readings batch [%d:%d]", i, end)
+		if err := insertReadings(collection, readings[i:end]); err != nil {
+			return fmt.Errorf("failed to insert batch %d-%d: %w", i, end, err)
 		}
 	}
 
-	//var wg sync.WaitGroup
+	count, err := countReadings(collection)
+	if err != nil {
+		return err
+	}
 
-	//for i := 0; i < numGoroutines; i++ {
-	//	wg.Add(1)
-	//	go func(i int) {
-	//		defer wg.Done()
-	//		start := i * batchSize
-	//		end := start + batchSize
-	//		if end > len(readings) {
-	//			end = len(readings)
-	//		}
-	//		err = insertReadings(readings[start:end], client.Database("sample_iot_data").Collection("readings"))
-	//		if err != nil {
-	//			log.Printf("Failed to insert batch %d: %v", i, err)
-	//		}
-	//	}(i)
-	//}
-	//wg.Wait()
+	log.Printf("Inserted %d records successfully", count)
 
-	log.Println("All data inserted.")
-	count := countReadings(client.Database("sample_iot_data").Collection("readings"))
-	log.Printf("Inserted %d records.", count)
-
-	// Disconnect from MongoDB
-	defer client.Disconnect(context.TODO())
+	return nil
 }
 
 func dropCollection(collection *mongo.Collection) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	err := collection.Drop(ctx)
-	if err != nil {
-		return err
+	if err := collection.Drop(ctx); err != nil {
+		return fmt.Errorf("failed to drop collection: %w", err)
 	}
-
 	return nil
 }
 
-func insertReadings(readings []Reading, collection *mongo.Collection) error {
+func insertReadings(collection *mongo.Collection, readings []Reading) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var documents []interface{}
 	for _, reading := range readings {
 		documents = append(documents, reading)
 	}
-
-	_, err := collection.InsertMany(ctx, documents)
-	if err != nil {
-		return err
+	if _, err := collection.InsertMany(ctx, documents); err != nil {
+		return fmt.Errorf("failed to insert readings: %w", err)
 	}
-
 	return nil
 }
 
-func countReadings(collection *mongo.Collection) int64 {
+func countReadings(collection *mongo.Collection) (int64, error) {
 	count, err := collection.CountDocuments(context.Background(), map[string]interface{}{})
 	if err != nil {
-		log.Fatal(err)
+		return 0, fmt.Errorf("failed to count readings: %w", err)
 	}
-
-	return count
+	return count, nil
 }
 
-// HashInt takes an integer and returns a hashed string
-func HashInt(i int) string {
+// hashInt takes an integer and returns a hashed string
+func hashInt(i int) string {
 	hasher := sha256.New()
 	idBuf := make([]byte, binary.MaxVarintLen64)
 	binary.PutVarint(idBuf, int64(i))
 	hasher.Write(idBuf)
 	hashedIdBytes := hasher.Sum(nil)
-	hashedId := fmt.Sprintf("%x", hashedIdBytes)
-	return hashedId
-}
-
-// toJSON takes a struct and returns its JSON representation as a string.
-// If marshaling fails, it logs the error and returns an empty string.
-func toJSON(v interface{}) string {
-	jsonData, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		log.Printf("Error marshaling to JSON: %s", err)
-		return ""
-	}
-	return string(jsonData)
+	return fmt.Sprintf("%x", hashedIdBytes)
 }
